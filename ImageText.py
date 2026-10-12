@@ -1,9 +1,13 @@
+import tkinter as tk
+import random
 import json
 import threading
 import urllib.request
-import tkinter as tk
+import urllib.error
+
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
+from datetime import datetime
 from PIL import Image, ImageOps, ImageFilter
 
 BG = "#10131B"
@@ -13,6 +17,8 @@ FG = "#EDF2F7"
 MUTED = "#A5B0C2"
 ACCENT = "#7667FF"
 BORDER = "#30394D"
+PV_BG = "#080A0F"
+PV_FG = "#F3F4F6"
 
 GITHUB_API = (
     "https://api.github.com/repos/"
@@ -22,27 +28,56 @@ GITHUB_RELEASE_PAGE = (
     "https://github.com/matt03052015-cloud/ImageText/releases/latest"
 )
 
-# Standard Unicode Braille dot layout: 2 columns × 4 rows.
 DOTS = [
-    (0, 0, 1),
-    (0, 1, 2),
-    (0, 2, 4),
-    (0, 3, 64),
-    (1, 0, 8),
-    (1, 1, 16),
-    (1, 2, 32),
-    (1, 3, 128),
+    (0, 0, 1), (0, 1, 2), (0, 2, 4), (0, 3, 64),
+    (1, 0, 8), (1, 1, 16), (1, 2, 32), (1, 3, 128)
 ]
+
+CODE_OPTIONS = [
+    ("§0 — Black", "§0", {"color": "#000000"}),
+    ("§1 — Dark Blue", "§1", {"color": "#0000AA"}),
+    ("§2 — Dark Green", "§2", {"color": "#00AA00"}),
+    ("§3 — Dark Aqua", "§3", {"color": "#00AAAA"}),
+    ("§4 — Dark Red", "§4", {"color": "#AA0000"}),
+    ("§5 — Dark Purple", "§5", {"color": "#AA00AA"}),
+    ("§6 — Gold", "§6", {"color": "#FFAA00"}),
+    ("§7 — Gray", "§7", {"color": "#AAAAAA"}),
+    ("§8 — Dark Gray", "§8", {"color": "#555555"}),
+    ("§9 — Blue", "§9", {"color": "#5555FF"}),
+    ("§a — Green", "§a", {"color": "#55FF55"}),
+    ("§b — Aqua", "§b", {"color": "#55FFFF"}),
+    ("§c — Red", "§c", {"color": "#FF5555"}),
+    ("§d — Light Purple", "§d", {"color": "#FF55FF"}),
+    ("§e — Yellow", "§e", {"color": "#FFFF55"}),
+    ("§f — White", "§f", {"color": "#FFFFFF"}),
+
+    # Additional Bedrock material / coin codes
+    ("§g — Minecoin Gold", "§g", {"color": "#FFAA00"}),
+    ("§h — Material Quartz", "§h", {"color": "#FFFFFF"}),
+    ("§i — Material Iron", "§i", {"color": "#C0C0C0"}),
+    ("§j — Material Netherite", "§j", {"color": "#3B3B3B"}),
+    ("§m — Material Redstone", "§m", {"color": "#FF0000"}),
+    ("§n — Material Copper", "§n", {"color": "#B87333"}),
+
+    # Formatting codes
+    ("§k — Obfuscated", "§k", {"format": "obfuscate"}),
+    ("§l — Bold", "§l", {"format": "bold"}),
+    ("§m — Strikethrough", "§m", {"format": "strike"}),
+    ("§n — Underlined", "§n", {"format": "underline"}),
+    ("§o — Italic", "§o", {"format": "italic"}),
+    ("§r — Reset", "§r", {"color": PV_FG}),
+]
+
+OB_CHARS = (
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789!@#$%^&*()_+-=[]{}|;:,.<>/?"
+)
 
 
 def threshold_art(
-    image,
-    width,
-    mode,
-    threshold,
-    sensitivity,
-    thickness,
-    transparent,
+    image, width, mode, threshold,
+    sensitivity, thickness, transparent
 ):
     image = ImageOps.exif_transpose(image).convert("RGBA")
     original_w, original_h = image.size
@@ -61,6 +96,8 @@ def threshold_art(
     gray = ImageOps.grayscale(rgb).resize(
         target_size, Image.Resampling.LANCZOS
     )
+
+    cutoff = int(threshold)
 
     if mode == "Convert to Line Art":
         edges = gray.filter(ImageFilter.FIND_EDGES)
@@ -86,8 +123,8 @@ def threshold_art(
         )
         gray = gray.convert("1").convert("L")
 
-    pix = gray.load()
-    apix = alpha.load()
+    pixels = gray.load()
+    alpha_pixels = alpha.load()
     result = []
 
     for cy in range(rows):
@@ -100,10 +137,10 @@ def threshold_art(
                 x = cx * 2 + dx
                 y = cy * 4 + dy
 
-                if transparent and apix[x, y] < 32:
+                if transparent and alpha_pixels[x, y] < 32:
                     continue
 
-                value = pix[x, y]
+                value = pixels[x, y]
 
                 if mode == "Convert to Line Art":
                     on = value < cutoff
@@ -129,16 +166,16 @@ def threshold_art(
 class ImageTextApp:
     def __init__(self, root):
         self.root = root
-
         root.title("ImageText — Unicode Dot Art")
         root.geometry("1180x790")
-        root.minsize(720, 500)
+        root.minsize(760, 540)
         root.configure(bg=BG)
 
         self.image = None
         self.image_path = None
         self.art = ""
         self._after_id = None
+        self._changelog_loading = False
 
         self.mode = tk.StringVar(value="Auto")
         self.width = tk.IntVar(value=180)
@@ -146,6 +183,8 @@ class ImageTextApp:
         self.sensitivity = tk.DoubleVar(value=0.45)
         self.thickness = tk.IntVar(value=1)
         self.transparent = tk.BooleanVar(value=True)
+        self.code_label = tk.StringVar(value="§f — White")
+
         self.status = tk.StringVar(
             value="Open an image to begin."
         )
@@ -166,44 +205,42 @@ class ImageTextApp:
             fieldbackground=PANEL2,
             background=PANEL2,
             foreground=FG,
-            arrowcolor=FG,
+            arrowcolor=FG
         )
         style.map(
             "TCombobox",
             fieldbackground=[("readonly", PANEL2)],
-            foreground=[("readonly", FG)],
+            foreground=[("readonly", FG)]
         )
         style.configure(
             "Horizontal.TScale",
             background=PANEL,
-            troughcolor=PANEL2,
+            troughcolor=PANEL2
         )
         style.configure(
             "TCheckbutton",
             background=PANEL,
-            foreground=FG,
+            foreground=FG
         )
         style.map(
             "TCheckbutton",
             background=[("active", PANEL)],
-            foreground=[("active", FG)],
+            foreground=[("active", FG)]
         )
 
     def _ui(self):
         header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x", padx=20, pady=(14, 12))
+        header.pack(fill="x", padx=20, pady=(15, 12))
 
         titlebox = tk.Frame(header, bg=BG)
-        titlebox.pack(
-            side="left", fill="x", expand=True
-        )
+        titlebox.pack(side="left", fill="x", expand=True)
 
         tk.Label(
             titlebox,
             text="ImageText",
             bg=BG,
             fg=FG,
-            font=("Segoe UI", 23, "bold"),
+            font=("Segoe UI", 23, "bold")
         ).pack(anchor="w")
 
         tk.Label(
@@ -211,123 +248,183 @@ class ImageTextApp:
             text="Convert pictures into Unicode Braille dot art",
             bg=BG,
             fg=MUTED,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 10)
         ).pack(anchor="w", pady=(2, 0))
 
         self._button(
-            header,
-            "＋  Open Image",
-            self.open_image,
-            ACCENT,
+            header, "＋  Open Image",
+            self.open_image, ACCENT
         ).pack(side="right")
 
         main = tk.Frame(self.root, bg=BG)
         main.pack(
-            fill="both",
-            expand=True,
-            padx=20,
-            pady=(0, 10),
+            fill="both", expand=True,
+            padx=20, pady=(0, 10)
         )
 
-        main.grid_columnconfigure(0, minsize=190, weight=0)
+        main.grid_columnconfigure(0, minsize=245, weight=0)
         main.grid_columnconfigure(1, weight=1)
         main.grid_rowconfigure(0, weight=1)
 
-        # Scrollable settings container.
-        side_outer = tk.Frame(
-            main,
-            bg=PANEL,
+        # Scrollable Settings container
+        side = tk.Frame(
+            main, bg=PANEL,
             highlightbackground=BORDER,
-            highlightthickness=1,
+            highlightthickness=1
         )
-        side_outer.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(0, 12),
+        side.grid(
+            row=0, column=0,
+            sticky="nsew", padx=(0, 14)
         )
-        side_outer.grid_rowconfigure(0, weight=1)
-        side_outer.grid_columnconfigure(0, weight=1)
+        side.grid_rowconfigure(0, weight=1)
+        side.grid_columnconfigure(0, weight=1)
 
         self.settings_canvas = tk.Canvas(
-            side_outer,
-            bg=PANEL,
-            highlightthickness=0,
-            borderwidth=0,
+            side, bg=PANEL, highlightthickness=0,
+            borderwidth=0
         )
+        self.settings_scrollbar = ttk.Scrollbar(
+            side, orient="vertical",
+            command=self.settings_canvas.yview
+        )
+        self.settings_canvas.configure(
+            yscrollcommand=self.settings_scrollbar.set
+        )
+
         self.settings_canvas.grid(
             row=0, column=0, sticky="nsew"
         )
-
-        settings_scrollbar = ttk.Scrollbar(
-            side_outer,
-            orient="vertical",
-            command=self.settings_canvas.yview,
-        )
-        settings_scrollbar.grid(
+        self.settings_scrollbar.grid(
             row=0, column=1, sticky="ns"
         )
 
-        self.settings_canvas.configure(
-            yscrollcommand=settings_scrollbar.set
-        )
-
-        self.side = tk.Frame(
+        self.settings_inner = tk.Frame(
             self.settings_canvas, bg=PANEL
         )
-
-        self.settings_window = (
-            self.settings_canvas.create_window(
-                (0, 0),
-                window=self.side,
-                anchor="nw",
-            )
+        self.settings_window = self.settings_canvas.create_window(
+            (0, 0), window=self.settings_inner, anchor="nw"
         )
 
-        self.side.bind(
-            "<Configure>", self._update_scroll_region
+        self.settings_inner.bind(
+            "<Configure>", self._update_settings_scroll
         )
         self.settings_canvas.bind(
-            "<Configure>", self._resize_settings
+            "<Configure>", self._resize_settings_inner
         )
 
         self.settings_canvas.bind(
-            "<Enter>", self._bind_mousewheel
+            "<Enter>", self._bind_settings_wheel
         )
         self.settings_canvas.bind(
-            "<Leave>", self._unbind_mousewheel
-        )
-        self.side.bind(
-            "<Enter>", self._bind_mousewheel
-        )
-        self.side.bind(
-            "<Leave>", self._unbind_mousewheel
+            "<Leave>", self._unbind_settings_wheel
         )
 
-        self.side.grid_columnconfigure(0, weight=1)
+        self._build_settings()
 
-        side = self.side
+        # Preview
+        right = tk.Frame(main, bg=BG)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(1, weight=1)
+
+        top = tk.Frame(right, bg=BG)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
         tk.Label(
-            side,
-            text="SETTINGS",
-            bg=PANEL,
-            fg=MUTED,
-            font=("Segoe UI", 9, "bold"),
+            top, text="DOT ART PREVIEW",
+            bg=BG, fg=FG,
+            font=("Segoe UI", 12, "bold")
+        ).pack(side="left")
+
+        self.count = tk.Label(
+            top, text="0 characters",
+            bg=BG, fg=MUTED,
+            font=("Segoe UI", 9)
+        )
+        self.count.pack(side="right")
+
+        art_panel = tk.Frame(
+            right, bg=PANEL,
+            highlightbackground=BORDER,
+            highlightthickness=1
+        )
+        art_panel.grid(row=1, column=0, sticky="nsew")
+        art_panel.grid_rowconfigure(0, weight=1)
+        art_panel.grid_columnconfigure(0, weight=1)
+
+        self.preview = tk.Text(
+            art_panel,
+            bg=PV_BG,
+            fg=PV_FG,
+            insertbackground=FG,
+            selectbackground="#454078",
+            font=("Consolas", 9),
+            wrap="none",
+            relief="flat",
+            padx=14,
+            pady=14,
+            undo=False
+        )
+
+        sy = ttk.Scrollbar(
+            art_panel, orient="vertical",
+            command=self.preview.yview
+        )
+        sx = ttk.Scrollbar(
+            art_panel, orient="horizontal",
+            command=self.preview.xview
+        )
+
+        self.preview.configure(
+            yscrollcommand=sy.set,
+            xscrollcommand=sx.set
+        )
+
+        self.preview.grid(row=0, column=0, sticky="nsew")
+        sy.grid(row=0, column=1, sticky="ns")
+        sx.grid(row=1, column=0, sticky="ew")
+
+        self.preview.insert(
+            "1.0", "Open an image to generate Braille dot art."
+        )
+        self.preview.configure(state="disabled")
+
+        footer = tk.Frame(self.root, bg=BG)
+        footer.pack(fill="x", padx=20, pady=(0, 12))
+
+        tk.Label(
+            footer,
+            textvariable=self.status,
+            bg=BG, fg=MUTED,
+            font=("Segoe UI", 9),
+            anchor="w"
+        ).pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            footer,
+            text="Ctrl+O open  •  Ctrl+S save",
+            bg=BG, fg="#65728A",
+            font=("Segoe UI", 9)
+        ).pack(side="right")
+
+    def _build_settings(self):
+        side = self.settings_inner
+
+        tk.Label(
+            side, text="SETTINGS",
+            bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 9, "bold")
         ).grid(
             row=0, column=0, sticky="w",
             padx=16, pady=(16, 12)
         )
 
         self.file_label = tk.Label(
-            side,
-            text="No image selected",
-            bg=PANEL,
-            fg=FG,
+            side, text="No image selected",
+            bg=PANEL, fg=FG,
             font=("Segoe UI", 10, "bold"),
-            wraplength=245,
-            anchor="w",
-            justify="left",
+            wraplength=220, anchor="w",
+            justify="left"
         )
         self.file_label.grid(
             row=1, column=0, sticky="ew",
@@ -337,14 +434,13 @@ class ImageTextApp:
         self._label(side, "MODE", 2)
 
         self.mode_box = ttk.Combobox(
-            side,
-            textvariable=self.mode,
+            side, textvariable=self.mode,
             values=[
                 "Auto",
                 "Convert to Line Art",
-                "Dither (shading)",
+                "Dither (shading)"
             ],
-            state="readonly",
+            state="readonly"
         )
         self.mode_box.grid(
             row=3, column=0, sticky="ew",
@@ -356,52 +452,77 @@ class ImageTextApp:
 
         tk.Label(
             side,
-            text="Choose the preprocessing that best suits your image.",
-            bg=PANEL,
-            fg=MUTED,
-            wraplength=245,
-            justify="left",
-            font=("Segoe UI", 8),
+            text="Choose how the image is processed.",
+            bg=PANEL, fg=MUTED,
+            wraplength=220, justify="left",
+            font=("Segoe UI", 8)
         ).grid(
             row=4, column=0, sticky="w",
             padx=16, pady=(2, 8)
         )
 
-        self._label(side, "RESOLUTION", 5)
-        self._slider(
-            side, 6, self.width,
-            10, 360, 10,
-            "Smaller", "More detailed",
+        # Color and formatting picker
+        self._label(side, "COLOR / FORMAT CODE", 5)
+
+        self.code_box = ttk.Combobox(
+            side,
+            textvariable=self.code_label,
+            values=[option[0] for option in CODE_OPTIONS],
+            state="readonly"
+        )
+        self.code_box.grid(
+            row=6, column=0, sticky="ew",
+            padx=16, pady=(0, 4)
+        )
+        self.code_box.bind(
+            "<<ComboboxSelected>>", self._on_code_change
         )
 
-        self._label(side, "THRESHOLD / DARKNESS", 7)
-        self._slider(
-            side, 8, self.threshold,
-            20, 235, 1,
-            "Darker", "Lighter",
+        tk.Label(
+            side,
+            text=(
+                "Preview applies the selected color or formatting. "
+                "Copy and Save add its § code to every line."
+            ),
+            bg=PANEL, fg=MUTED,
+            wraplength=220, justify="left",
+            font=("Segoe UI", 8)
+        ).grid(
+            row=7, column=0, sticky="w",
+            padx=16, pady=(2, 8)
         )
 
-        self._label(side, "LINE SENSITIVITY", 9)
+        self._label(side, "RESOLUTION", 8)
         self._slider(
-            side, 10, self.sensitivity,
-            0.0, 1.0, 0.05,
-            "Fewer lines", "More lines",
+            side, 9, self.width, 10, 360, 5,
+            "width", "Smaller", "More detailed"
         )
 
-        self._label(side, "LINE THICKNESS", 11)
+        self._label(side, "THRESHOLD / DARKNESS", 10)
         self._slider(
-            side, 12, self.thickness,
-            0, 4, 1,
-            "Thinner", "Thicker",
+            side, 11, self.threshold, 20, 235, 5,
+            "threshold", "Darker", "Lighter"
+        )
+
+        self._label(side, "LINE SENSITIVITY", 12)
+        self._slider(
+            side, 13, self.sensitivity, 0.0, 1.0, 0.05,
+            "sensitivity", "Fewer lines", "More lines"
+        )
+
+        self._label(side, "LINE THICKNESS", 14)
+        self._slider(
+            side, 15, self.thickness, 0, 4, 1,
+            "thickness", "Thinner", "Thicker"
         )
 
         ttk.Checkbutton(
             side,
             text="Keep transparent pixels blank",
             variable=self.transparent,
-            command=self._schedule_convert,
+            command=self._schedule_convert
         ).grid(
-            row=13, column=0, sticky="w",
+            row=16, column=0, sticky="w",
             padx=16, pady=(12, 8)
         )
 
@@ -411,34 +532,25 @@ class ImageTextApp:
                 "Line controls work in Line Art mode. "
                 "Dither creates stippled shading."
             ),
-            bg=PANEL,
-            fg=MUTED,
-            wraplength=245,
-            justify="left",
-            font=("Segoe UI", 8),
+            bg=PANEL, fg=MUTED,
+            wraplength=220, justify="left",
+            font=("Segoe UI", 8)
         ).grid(
-            row=14, column=0, sticky="w",
+            row=17, column=0, sticky="w",
             padx=16, pady=(0, 12)
         )
 
-        tk.Frame(
-            side, bg=BORDER, height=1
-        ).grid(
-            row=15, column=0, sticky="ew",
+        tk.Frame(side, bg=BORDER, height=1).grid(
+            row=18, column=0, sticky="ew",
             padx=16, pady=3
         )
 
         actions = tk.Frame(side, bg=PANEL)
         actions.grid(
-            row=16, column=0, sticky="ew",
+            row=19, column=0, sticky="ew",
             padx=16, pady=12
         )
-        actions.grid_columnconfigure(
-            0, weight=1
-        )
-        actions.grid_columnconfigure(
-            1, weight=1
-        )
+        actions.grid_columnconfigure((0, 1), weight=1)
 
         self._button(
             actions, "Reset Settings",
@@ -472,188 +584,60 @@ class ImageTextApp:
             sticky="ew", pady=3
         )
 
-        # Right-side preview.
-        right = tk.Frame(main, bg=BG)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+    # ---------- Settings scrolling ----------
 
-        top = tk.Frame(right, bg=BG)
-        top.grid(
-            row=0, column=0, sticky="ew",
-            pady=(0, 8)
-        )
-
-        tk.Label(
-            top,
-            text="DOT ART PREVIEW",
-            bg=BG,
-            fg=FG,
-            font=("Segoe UI", 12, "bold"),
-        ).pack(side="left")
-
-        self.count = tk.Label(
-            top,
-            text="0 characters",
-            bg=BG,
-            fg=MUTED,
-            font=("Segoe UI", 9),
-        )
-        self.count.pack(side="right")
-
-        art_panel = tk.Frame(
-            right,
-            bg=PANEL,
-            highlightbackground=BORDER,
-            highlightthickness=1,
-        )
-        art_panel.grid(
-            row=1, column=0, sticky="nsew"
-        )
-        art_panel.grid_rowconfigure(0, weight=1)
-        art_panel.grid_columnconfigure(0, weight=1)
-
-        self.preview = tk.Text(
-            art_panel,
-            bg="#080A0F",
-            fg="#F3F4F6",
-            insertbackground=FG,
-            selectbackground="#454078",
-            font=("Consolas", 9),
-            wrap="none",
-            relief="flat",
-            padx=14,
-            pady=14,
-            undo=False,
-        )
-
-        sy = ttk.Scrollbar(
-            art_panel,
-            orient="vertical",
-            command=self.preview.yview,
-        )
-        sx = ttk.Scrollbar(
-            art_panel,
-            orient="horizontal",
-            command=self.preview.xview,
-        )
-
-        self.preview.configure(
-            yscrollcommand=sy.set,
-            xscrollcommand=sx.set,
-        )
-
-        self.preview.grid(
-            row=0, column=0, sticky="nsew"
-        )
-        sy.grid(row=0, column=1, sticky="ns")
-        sx.grid(row=1, column=0, sticky="ew")
-
-        self.preview.insert(
-            "1.0",
-            "Open an image to generate Braille dot art.",
-        )
-        self.preview.configure(state="disabled")
-
-        footer = tk.Frame(self.root, bg=BG)
-        footer.pack(
-            fill="x", padx=20, pady=(0, 12)
-        )
-
-        tk.Label(
-            footer,
-            textvariable=self.status,
-            bg=BG,
-            fg=MUTED,
-            font=("Segoe UI", 9),
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
-
-        tk.Label(
-            footer,
-            text="Offline conversion  •  Ctrl+O open  •  Ctrl+S save",
-            bg=BG,
-            fg="#65728A",
-            font=("Segoe UI", 9),
-        ).pack(side="right")
-
-    # Scrollable Settings helpers.
-
-    def _update_scroll_region(self, _event=None):
+    def _update_settings_scroll(self, _event=None):
         self.settings_canvas.configure(
             scrollregion=self.settings_canvas.bbox("all")
         )
 
-    def _resize_settings(self, event):
+    def _resize_settings_inner(self, event):
         self.settings_canvas.itemconfigure(
-            self.settings_window,
-            width=event.width,
+            self.settings_window, width=event.width
         )
 
-    def _bind_mousewheel(self, _event=None):
+    def _bind_settings_wheel(self, _event=None):
         self.root.bind_all(
             "<MouseWheel>", self._settings_mousewheel
         )
         self.root.bind_all(
-            "<Button-4>", self._settings_linux_wheel
+            "<Button-4>", self._settings_mousewheel_linux
         )
         self.root.bind_all(
-            "<Button-5>", self._settings_linux_wheel
+            "<Button-5>", self._settings_mousewheel_linux
         )
 
-    def _unbind_mousewheel(self, _event=None):
+    def _unbind_settings_wheel(self, _event=None):
         self.root.unbind_all("<MouseWheel>")
         self.root.unbind_all("<Button-4>")
         self.root.unbind_all("<Button-5>")
 
     def _settings_mousewheel(self, event):
-        widget = self.root.winfo_containing(
-            event.x_root, event.y_root
+        self.settings_canvas.yview_scroll(
+            int(-event.delta / 120), "units"
         )
 
-        # Only scroll Settings when the pointer is over that panel.
-        if widget is None:
-            return
-
-        current = widget
-        over_settings = False
-
-        while current is not None:
-            if current == self.settings_canvas:
-                over_settings = True
-                break
-
-            try:
-                current = current.master
-            except AttributeError:
-                break
-
-        if over_settings:
-            self.settings_canvas.yview_scroll(
-                int(-event.delta / 120), "units"
-            )
-
-    def _settings_linux_wheel(self, event):
+    def _settings_mousewheel_linux(self, event):
         if event.num == 4:
             self.settings_canvas.yview_scroll(-1, "units")
         elif event.num == 5:
             self.settings_canvas.yview_scroll(1, "units")
 
+    # ---------- UI helpers ----------
+
     def _label(self, parent, text, row):
         tk.Label(
-            parent,
-            text=text,
-            bg=PANEL,
-            fg=FG,
-            font=("Segoe UI", 9, "bold"),
+            parent, text=text,
+            bg=PANEL, fg=FG,
+            font=("Segoe UI", 9, "bold")
         ).grid(
             row=row, column=0, sticky="w",
             padx=16, pady=(7, 2)
         )
 
     def _slider(
-        self, parent, row, var,
-        low, high, resolution, left, right,
+        self, parent, row, var, low, high,
+        resolution, key, left, right
     ):
         wrap = tk.Frame(parent, bg=PANEL)
         wrap.grid(
@@ -676,50 +660,121 @@ class ImageTextApp:
             activebackground=ACCENT,
             highlightthickness=0,
             bd=0,
-            showvalue=True,
-            length=230,
+            showvalue=True
         )
         scale.grid(row=0, column=0, sticky="ew")
 
         tk.Label(
-            wrap,
-            text=left,
-            bg=PANEL,
-            fg=MUTED,
-            font=("Segoe UI", 8),
+            wrap, text=left,
+            bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 8)
         ).grid(row=1, column=0, sticky="w")
 
         tk.Label(
-            wrap,
-            text=right,
-            bg=PANEL,
-            fg=MUTED,
-            font=("Segoe UI", 8),
+            wrap, text=right,
+            bg=PANEL, fg=MUTED,
+            font=("Segoe UI", 8)
         ).grid(row=1, column=0, sticky="e")
 
     def _button(self, parent, text, command, color):
         return tk.Button(
-            parent,
-            text=text,
+            parent, text=text,
             command=command,
-            bg=color,
-            fg="white",
+            bg=color, fg="white",
             activebackground=color,
             activeforeground="white",
-            relief="flat",
-            bd=0,
-            padx=13,
-            pady=9,
+            relief="flat", bd=0,
+            padx=13, pady=9,
             cursor="hand2",
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 9, "bold")
         )
 
+    # ---------- Color and formatting ----------
+
+    def _get_code_spec(self):
+        label = self.code_label.get()
+
+        for option_label, code, spec in CODE_OPTIONS:
+            if option_label == label:
+                return code, spec
+
+        return "§f", {"color": "#FFFFFF"}
+
+    def _on_code_change(self, *_):
+        if self.art:
+            self._render()
+
+    def _obfuscate(self, text):
+        return "".join(
+            random.choice(OB_CHARS) if char != " " else " "
+            for char in text
+        )
+
+    def _render(self):
+        if not self.art:
+            return
+
+        _code, spec = self._get_code_spec()
+        text = self.art
+
+        if spec.get("format") == "obfuscate":
+            text = self._obfuscate(self.art)
+
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        self.preview.insert("1.0", text)
+
+        tag = "selected_format"
+
+        self.preview.tag_configure(
+            tag,
+            foreground=PV_FG,
+            font=("Consolas", 9),
+            underline=False,
+            overstrike=False
+        )
+
+        if spec.get("color"):
+            self.preview.tag_configure(
+                tag, foreground=spec["color"]
+            )
+
+        fmt = spec.get("format")
+
+        if fmt == "bold":
+            self.preview.tag_configure(
+                tag, font=("Consolas", 9, "bold")
+            )
+        elif fmt == "italic":
+            self.preview.tag_configure(
+                tag, font=("Consolas", 9, "italic")
+            )
+        elif fmt == "underline":
+            self.preview.tag_configure(
+                tag, underline=True
+            )
+        elif fmt == "strike":
+            self.preview.tag_configure(
+                tag, overstrike=True
+            )
+
+        self.preview.tag_add(tag, "1.0", "end")
+        self.preview.configure(state="disabled")
+
+    def _art_with_code(self):
+        code, _spec = self._get_code_spec()
+
+        # Prefix the selected code on every output line.
+        return "\n".join(
+            code + line for line in self.art.split("\n")
+        )
+
+    # ---------- Conversion ----------
+
     def _schedule_convert(self, *_):
-        if self._after_id:
-            try:
-                self.root.after_cancel(self._after_id)
-            except tk.TclError:
-                pass
+        if self._after_id is not None:
+            self.root.after_cancel(self._after_id)
+            self._after_id = None
 
         if self.image is not None:
             self._after_id = self.root.after(
@@ -733,10 +788,10 @@ class ImageTextApp:
                 (
                     "Image files",
                     "*.png *.jpg *.jpeg *.webp *.bmp "
-                    "*.gif *.tif *.tiff",
+                    "*.gif *.tif *.tiff"
                 ),
-                ("All files", "*.*"),
-            ],
+                ("All files", "*.*")
+            ]
         )
 
         if not path:
@@ -752,15 +807,15 @@ class ImageTextApp:
             self.file_label.configure(
                 text=self.image_path.name
             )
+
             self.status.set(
                 f"Loaded {im.width} × {im.height} image"
             )
+
             self.convert()
 
         except Exception as error:
-            messagebox.showerror(
-                "Image Error", str(error)
-            )
+            messagebox.showerror("Image Error", str(error))
 
     def convert(self, *_):
         self._after_id = None
@@ -776,13 +831,10 @@ class ImageTextApp:
                 self.threshold.get(),
                 float(self.sensitivity.get()),
                 self.thickness.get(),
-                self.transparent.get(),
+                self.transparent.get()
             )
 
-            self.preview.configure(state="normal")
-            self.preview.delete("1.0", "end")
-            self.preview.insert("1.0", self.art)
-            self.preview.configure(state="disabled")
+            self._render()
 
             self.count.configure(
                 text=f"{len(self.art):,} characters"
@@ -798,75 +850,71 @@ class ImageTextApp:
                 "Conversion Error", str(error)
             )
 
-    # Fetch changelog from GitHub Releases API.
+    # ---------- GitHub changelog ----------
 
     def show_changelog(self):
         win = tk.Toplevel(self.root)
         win.title("ImageText — Changelog")
-        win.geometry("650x560")
-        win.minsize(350, 300)
+        win.geometry("700x570")
+        win.minsize(480, 350)
         win.configure(bg=BG)
         win.transient(self.root)
 
         tk.Label(
-            win,
-            text="CHANGELOG",
-            bg=BG,
-            fg=FG,
-            font=("Segoe UI", 17, "bold"),
-        ).pack(
-            anchor="w", padx=20, pady=(18, 8)
+            win, text="CHANGELOG",
+            bg=BG, fg=FG,
+            font=("Segoe UI", 17, "bold")
+        ).pack(anchor="w", padx=20, pady=(18, 8))
+
+        status = tk.StringVar(
+            value="Fetching the latest GitHub release..."
         )
 
-        status = tk.Label(
-            win,
-            text="Fetching latest release from GitHub...",
-            bg=BG,
-            fg=MUTED,
+        tk.Label(
+            win, textvariable=status,
+            bg=BG, fg=MUTED,
             font=("Segoe UI", 9),
-            anchor="w",
-        )
-        status.pack(
-            fill="x", padx=20, pady=(0, 8)
-        )
+            anchor="w"
+        ).pack(fill="x", padx=20, pady=(0, 8))
 
-        text_frame = tk.Frame(win, bg=BG)
+        text_frame = tk.Frame(win, bg=PV_BG)
         text_frame.pack(
             fill="both", expand=True,
-            padx=20, pady=(0, 14)
+            padx=20, pady=(0, 12)
         )
         text_frame.grid_rowconfigure(0, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
 
         box = tk.Text(
             text_frame,
-            bg="#080A0F",
-            fg=FG,
+            bg=PV_BG, fg=FG,
             insertbackground=FG,
             font=("Consolas", 10),
-            wrap="word",
-            relief="flat",
-            padx=16,
-            pady=14,
+            wrap="word", relief="flat",
+            padx=14, pady=12
         )
 
         scrollbar = ttk.Scrollbar(
-            text_frame,
-            orient="vertical",
-            command=box.yview,
+            text_frame, orient="vertical",
+            command=box.yview
         )
         box.configure(yscrollcommand=scrollbar.set)
-
         box.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
 
-        def display_message(message):
+        box.insert(
+            "1.0",
+            "Loading release information from GitHub..."
+        )
+        box.configure(state="disabled")
+
+        def display(content):
             if not win.winfo_exists():
                 return
 
             box.configure(state="normal")
             box.delete("1.0", "end")
-            box.insert("1.0", message)
+            box.insert("1.0", content)
             box.configure(state="disabled")
 
         def fetch_release():
@@ -875,84 +923,94 @@ class ImageTextApp:
                     GITHUB_API,
                     headers={
                         "Accept": "application/vnd.github+json",
-                        "User-Agent": "ImageText-Changelog",
-                    },
+                        "User-Agent": "ImageText-App"
+                    }
                 )
 
                 with urllib.request.urlopen(
-                    request, timeout=12
+                    request, timeout=10
                 ) as response:
-                    release = json.loads(
+                    data = json.loads(
                         response.read().decode("utf-8")
                     )
 
-                version = release.get(
-                    "tag_name", "Unknown version"
-                )
-                name = release.get("name") or version
-                published = release.get(
-                    "published_at", "Unknown date"
-                )
-                body = release.get("body") or (
-                    "No release notes were provided for this release."
-                )
-                release_url = release.get(
-                    "html_url", GITHUB_RELEASE_PAGE
-                )
+                if data.get("message"):
+                    raise RuntimeError(data["message"])
 
-                message = (
-                    f"{name}\n"
-                    f"{'=' * len(name)}\n\n"
-                    f"Version: {version}\n"
-                    f"Published: {published}\n\n"
-                    f"RELEASE NOTES\n"
-                    f"{'-' * 40}\n\n"
-                    f"{body}\n\n"
-                    f"Release page:\n{release_url}"
+                name = data.get("name") or "Latest Release"
+                tag = data.get("tag_name") or "No version tag"
+                body = data.get("body") or (
+                    "This release does not contain release notes."
                 )
-
-                def update_success():
-                    if not win.winfo_exists():
-                        return
-                    status.configure(
-                        text="Latest published release loaded from GitHub."
-                    )
-                    display_message(message)
-
-                win.after(0, update_success)
-
-            except Exception as error:
-                message = (
-                    "Unable to load the latest changelog.\n\n"
-                    f"Reason: {error}\n\n"
-                    "Check your internet connection and try again.\n\n"
-                    "You can view the release notes here:\n"
-                    f"{GITHUB_RELEASE_PAGE}"
-                )
-
-                def update_error():
-                    if not win.winfo_exists():
-                        return
-                    status.configure(
-                        text="Could not load release notes."
-                    )
-                    display_message(message)
+                published = data.get("published_at") or "Unknown"
+                url = data.get("html_url") or GITHUB_RELEASE_PAGE
 
                 try:
-                    win.after(0, update_error)
-                except tk.TclError:
-                    pass
+                    date = datetime.fromisoformat(
+                        published.replace("Z", "+00:00")
+                    ).strftime("%Y-%m-%d %H:%M UTC")
+                except (ValueError, TypeError):
+                    date = published
+
+                content = (
+                    f"{name}\n"
+                    f"Version: {tag}\n"
+                    f"Published: {date}\n"
+                    f"Release page: {url}\n\n"
+                    f"{body}"
+                )
+
+                self.root.after(
+                    0,
+                    lambda: (
+                        status.set(f"Loaded release {tag}"),
+                        display(content)
+                    )
+                )
+
+            except Exception as error:
+                content = (
+                    "Unable to fetch the latest release notes.\n\n"
+                    f"Reason: {error}\n\n"
+                    "Check your internet connection, or open the "
+                    "GitHub release page directly:\n"
+                    f"{GITHUB_RELEASE_PAGE}\n\n"
+                    "Image conversion still works offline."
+                )
+
+                self.root.after(
+                    0,
+                    lambda: (
+                        status.set("Could not load GitHub release"),
+                        display(content)
+                    )
+                )
 
         threading.Thread(
             target=fetch_release,
-            daemon=True,
+            daemon=True
         ).start()
 
-        self._button(
-            win, "Close", win.destroy, ACCENT
-        ).pack(
-            anchor="e", padx=20, pady=(0, 16)
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(
+            fill="x", padx=20, pady=(0, 16)
         )
+
+        self._button(
+            buttons, "Open GitHub Release",
+            lambda: self._open_release_page(),
+            "#334155"
+        ).pack(side="left")
+
+        self._button(
+            buttons, "Close", win.destroy, ACCENT
+        ).pack(side="right")
+
+    def _open_release_page(self):
+        import webbrowser
+        webbrowser.open(GITHUB_RELEASE_PAGE)
+
+    # ---------- Reset / copy / save ----------
 
     def reset(self):
         self.mode.set("Auto")
@@ -961,7 +1019,12 @@ class ImageTextApp:
         self.sensitivity.set(0.45)
         self.thickness.set(1)
         self.transparent.set(True)
-        self.convert()
+        self.code_label.set("§f — White")
+
+        if self.image is not None:
+            self.convert()
+        else:
+            self.status.set("Settings reset.")
 
     def copy_art(self):
         if not self.art:
@@ -971,11 +1034,15 @@ class ImageTextApp:
             return
 
         try:
+            output = self._art_with_code()
+
             self.root.clipboard_clear()
-            self.root.clipboard_append(self.art)
+            self.root.clipboard_append(output)
             self.root.update()
+
+            code, _spec = self._get_code_spec()
             self.status.set(
-                "Unicode Braille art copied to clipboard."
+                f"Art copied with {code} prefix."
             )
 
         except Exception as error:
@@ -1000,7 +1067,7 @@ class ImageTextApp:
             title="Save dot art",
             defaultextension=".txt",
             initialfile=default,
-            filetypes=[("Text files", "*.txt")],
+            filetypes=[("Text files", "*.txt")]
         )
 
         if not path:
@@ -1008,8 +1075,10 @@ class ImageTextApp:
 
         try:
             Path(path).write_text(
-                self.art, encoding="utf-8"
+                self._art_with_code(),
+                encoding="utf-8"
             )
+
             self.status.set(
                 f"Saved {Path(path).name}"
             )
